@@ -1,0 +1,97 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+
+  datasource:
+    # Kết nối tới Postgres trên localhost khi chạy ứng dụng từ máy host
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/order_db
+    username: postgres
+    password: password
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate.dialect: org.hibernate.dialect.PostgreSQLDialect
+      hibernate.jdbc.batch_size: 50
+      hibernate.order_inserts: true
+      hibernate.order_updates: true
+      # Tối ưu hóa việc sinh ID tự động cho PostgreSQL (sử dụng Sequence hiệu quả hơn)
+      hibernate.id.new_generator_mappings: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      lettuce:
+        pool:
+          max-active: 64
+          max-idle: 32
+          min-idle: 8
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      acks: all # Đảm bảo độ tin cậy dữ liệu
+      batch-size: 65536 # Tăng buffer size lên 64KB để OutboxRelay đẩy hàng nhanh hơn
+      compression-type: lz4
+      properties:
+        linger.ms: 10 # Cho phép delay tối đa 10ms gom lô tại memory mạng trước khi bay sang Broker
+        # Giới hạn số lượng request bất đồng bộ đồng thời trên 1 kết nối tới Broker = 1
+        # Đảm bảo record 1 phải ghi xong thành công thì record 2 mới được ghi, không sợ lỗi mạng làm đảo lộn thứ tự.
+        max.in.flight.requests.per.connection: 1
+    consumer:
+      group-id: inventory-service
+      auto-offset-reset: earliest
+      max-poll-records: 500 # Gom tối đa 500 bản ghi cho mỗi lần poll()
+      enable-auto-commit: false # Tắt auto-commit để kiểm soát Ack thủ công - batch
+      properties:
+        max.poll.interval.ms: 300000
+    listener:
+      observation-enabled: true
+      # Thêm xử lý batch
+      type: batch # CHUYỂN SANG BATCH CONSUMER
+      ack-mode: manual_immediate # Ack thủ công ngay khi xử lý xong batch dữ liệu
+
+app:
+  topics:
+    partitions: 12
+  outbox:
+    poll-interval-ms: 100
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus, metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  tracing:
+    sampling:
+      probability: 1.0
+  # OpenTelemetry: export traces + logs over OTLP to the collector, which fans
+  # out to Tempo (traces) and Loki (logs). Metrics stay pull-based via Prometheus.
+  otlp:
+    tracing:
+      endpoint: ${OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+    logging:
+      endpoint: ${OTLP_ENDPOINT:http://localhost:4318}/v1/logs
+      export:
+        enabled: true
+  opentelemetry:
+    resource-attributes:
+      service.name: ${spring.application.name}
+      deployment.environment: local
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-}]"

@@ -1,0 +1,49 @@
+# OpenTelemetry Collector — the single ingestion seam for app telemetry.
+# Apps push OTLP (traces + logs) to the host's :4318; this fans them out to the
+# backing stores. Metrics are NOT routed here — Prometheus scrapes the apps
+# directly (pull model + exemplars), which is the idiomatic Micrometer setup.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Batch before export: fewer, larger requests to the backends.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  # Guardrail so a telemetry spike can't OOM the collector.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+exporters:
+  # Traces -> Tempo over OTLP/gRPC.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Logs -> Loki's native OTLP endpoint (Loki 3.x). otlphttp appends /v1/logs.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  # Uncomment to eyeball telemetry in `docker logs edd-otel-collector`.
+  # debug:
+  #   verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]
+  telemetry:
+    logs:
+      level: info

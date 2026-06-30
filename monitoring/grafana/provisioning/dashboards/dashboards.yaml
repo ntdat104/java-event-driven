@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: edd-dashboards
+    orgId: 1
+    folder: "Event-Driven"
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

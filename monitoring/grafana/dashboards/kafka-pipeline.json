@@ -1,0 +1,137 @@
+{
+  "uid": "edd-kafka-pipeline",
+  "title": "EDD · Kafka & Event Pipeline",
+  "tags": ["event-driven", "kafka"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "application",
+        "label": "Service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(kafka_consumer_fetch_manager_records_consumed_total, application)", "refId": "A" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Consumers",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "Max consumer lag",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 50000 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "expr": "max(kafka_consumer_fetch_manager_records_lag_max{application=~\"$application\"})" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Records consumed /s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(kafka_consumer_fetch_manager_records_consumed_total{application=~\"$application\"}[1m]))" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Records produced /s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(kafka_producer_record_send_total{application=~\"$application\"}[1m]))" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Listener errors /s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ops", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.001 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(spring_kafka_listener_seconds_count{application=~\"$application\",exception!=\"none\",exception!=\"None\"}[1m]))" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer lag over time",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } } },
+      "targets": [
+        { "refId": "A", "expr": "max by (application) (kafka_consumer_fetch_manager_records_lag_max{application=~\"$application\"})", "legendFormat": "{{application}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Records consumed rate by service",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } } } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (application) (rate(kafka_consumer_fetch_manager_records_consumed_total{application=~\"$application\"}[1m]))", "legendFormat": "{{application}}" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Listener processing",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Avg listener processing time",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 5 } } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (application) (rate(spring_kafka_listener_seconds_sum{application=~\"$application\"}[1m])) / clamp_min(sum by (application) (rate(spring_kafka_listener_seconds_count{application=~\"$application\"}[1m])), 1)", "legendFormat": "{{application}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Listener throughput (ok vs error)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "bars", "fillOpacity": 40, "stacking": { "mode": "normal" } } } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(spring_kafka_listener_seconds_count{application=~\"$application\",exception=~\"none|None\"}[1m]))", "legendFormat": "ok" },
+        { "refId": "B", "expr": "sum(rate(spring_kafka_listener_seconds_count{application=~\"$application\",exception!~\"none|None\"}[1m]))", "legendFormat": "error" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Errors & DLQ logs (Loki)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }
+    },
+    {
+      "type": "logs",
+      "title": "Error & warning logs — click trace_id to open the trace",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 24 },
+      "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "expr": "{service_name=~\"$application\"} | detected_level=~\"error|warn\"", "queryType": "range" }
+      ]
+    }
+  ]
+}
