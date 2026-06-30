@@ -1,0 +1,29 @@
+# SSL/mTLS override for the Kafka broker — overlays docker-compose.yml.
+#
+#   1. scripts/generate-kafka-certs.sh           # creates ./certs/*
+#   2. docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d
+#   3. run the apps with the kafka-ssl profile:
+#        SPRING_PROFILES_ACTIVE=kafka-ssl mvn -pl order-service spring-boot:run
+#
+# The HOST listener (port 9092, used by the apps on localhost) becomes SSL with
+# client-auth required (mTLS). The DOCKER listener (19092) stays PLAINTEXT for
+# inter-broker traffic, kafka-ui, and the healthcheck.
+services:
+  kafka:
+    environment:
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,HOST:SSL,DOCKER:PLAINTEXT
+      # Broker identity + trust (the CA) so it can verify client certs (mTLS).
+      KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/kafka.server.keystore.jks
+      KAFKA_SSL_KEYSTORE_PASSWORD: changeit
+      KAFKA_SSL_KEY_PASSWORD: changeit
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.server.truststore.jks
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit
+      KAFKA_SSL_CLIENT_AUTH: required
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+    # Healthcheck talks to the PLAINTEXT DOCKER listener, so it needs no certs.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10

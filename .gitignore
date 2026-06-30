@@ -1,0 +1,5 @@
+target/
+/data/
+*.log
+# OpenSSL CA serial scratch file
+certs/*.srl

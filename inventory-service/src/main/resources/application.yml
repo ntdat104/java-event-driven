@@ -95,3 +95,30 @@ management:
 logging:
   pattern:
     level: "%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-}]"
+
+# ============================================================================
+# Profile: kafka-ssl  →  Kafka over TLS (mTLS) for production.
+# Default profile stays PLAINTEXT so local dev (docker-compose.yml) is untouched.
+# Activate with: --spring.profiles.active=kafka-ssl  (or SPRING_PROFILES_ACTIVE)
+# These props flow through KafkaProperties into BOTH producer and consumer
+# automatically — no code change in KafkaConfig is needed.
+# Override the file locations / passwords via env vars in production.
+# ============================================================================
+---
+spring:
+  config:
+    activate:
+      on-profile: kafka-ssl
+  kafka:
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:SSL}
+    ssl:
+      trust-store-location: ${KAFKA_SSL_TRUSTSTORE_LOCATION:file:certs/kafka.client.truststore.jks}
+      trust-store-password: ${KAFKA_SSL_TRUSTSTORE_PASSWORD:changeit}
+      key-store-location: ${KAFKA_SSL_KEYSTORE_LOCATION:file:certs/kafka.client.keystore.jks}
+      key-store-password: ${KAFKA_SSL_KEYSTORE_PASSWORD:changeit}
+      key-password: ${KAFKA_SSL_KEY_PASSWORD:changeit}
+    properties:
+      # Verify the broker hostname against the cert SAN. Set to empty string to
+      # disable (NOT recommended) if connecting via an address not in the SAN.
+      ssl.endpoint.identification.algorithm: ${KAFKA_SSL_ENDPOINT_ALGO:https}
