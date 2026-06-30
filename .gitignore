@@ -1,5 +1,6 @@
 target/
 /data/
 *.log
+load-test-summary.json
 # OpenSSL CA serial scratch file
 certs/*.srl

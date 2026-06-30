@@ -174,9 +174,12 @@ curl -s localhost:8081/api/orders/<orderId>
 curl -s localhost:8082/api/inventory/p1
 ```
 
-### 5. Load test (~10k req/s)
+### 5. Load test (~10k req/s, clustered)
+Run **5 order + 5 inventory** instances behind nginx and fire k6 at them — see
+[Scale-out & load testing](#scale-out--load-testing-5-order--5-inventory--nginx) below.
 ```bash
-./scripts/load-test.sh 100000 200      # 100k requests, 200 concurrent (needs `hey` or falls back to ab)
+docker compose up -d --build          # brings up nginx + 5+5 app instances too
+./scripts/load-test.sh                # k6 @ 10k req/s for 60s, then a loss/lag/DLQ report
 ```
 
 ## Production-like Kafka: 5-broker cluster over SSL/mTLS
@@ -212,6 +215,53 @@ KAFKA_CERT_PASSWORD=<strong> KAFKA_BROKER_SAN="DNS:broker1.prod,DNS:broker2.prod
 > ⚠️ The committed certs use the throwaway password `changeit` for convenience.
 > For real production regenerate with a strong password and keep the key material
 > in a secret manager — never in git. See `certs/README.md`.
+
+## Scale-out & load testing (5 order + 5 inventory + nginx)
+
+`docker-compose.yml` also runs both services **containerised and scaled to 5
+instances each**, load-balanced by nginx — the topology you'd benchmark 10k req/s
+against. The apps reach the cluster over the internal SSL listeners (`kafkaN:19092`).
+
+```
+                 ┌─────────┐   /api/orders     ┌─ order-1 ─┐
+   k6  ─10k/s──► │  nginx  │ ─ least_conn ───► │   ...     │ ─┐
+                 │  :8088  │   /api/inventory   └─ order-5 ─┘  │  orders.created
+                 └─────────┘ ─────────────────►(inventory-1..5)│  inventory.reserved
+                                                               ▼
+                                        5-broker Kafka (SSL) · Postgres · Redis
+```
+
+| Piece            | Detail |
+|------------------|--------|
+| order-1..5       | nginx upstream `order_backend` (keepalive), each an OutboxRelay sharing the table via `SELECT … FOR UPDATE SKIP LOCKED` |
+| inventory-1..5   | one consumer per partition (5 partitions ⇒ 5 active across the group) |
+| nginx            | `localhost:8088`, round-robins + `proxy_next_upstream` so a dead instance is skipped |
+| Postgres         | `max_connections=300`; each app caps its Hikari pool at 20 (10×20 = 200) |
+
+```bash
+docker compose up -d --build          # 5 brokers + Postgres + Redis + 5+5 apps + nginx
+docker compose ps                     # wait until order-* / inventory-* are healthy
+./scripts/load-test.sh                # 10k req/s, 60s          (override: RATE, DURATION)
+RATE=5000 DURATION=120s ./scripts/load-test.sh
+```
+
+The script uses **k6** (native, or the `grafana/k6` container if k6 isn't
+installed) and after the run reports — so you can answer "ổn định không, mất
+message không, chịu lỗi ra sao":
+
+- **Throughput / latency / errors** — k6 summary (`http_reqs`, `p95`/`p99`, `http_req_failed`)
+- **No message loss** — `orders.created` count ≥ HTTP-202 accepted (producer), and
+  `inventory.reserved` ≥ `orders.created` (every event consumed)
+- **DLQ** — `*.DLT` topics should be empty (no poison messages)
+- **Drain / lag** — waits for both consumer groups' lag → 0
+- **Final state** — order status distribution in Postgres; **0 PENDING** ⇒ nothing stuck
+
+**Fault tolerance** — re-run the test and mid-flight:
+```bash
+docker compose stop kafka3     # broker down → RF=3 + min.insync=2 keeps producing
+docker compose stop order-3    # instance down → nginx routes around it
+```
+The verdict should still show an empty DLQ, lag draining, and 0 PENDING — i.e. no loss.
 
 ## Consoles
 
