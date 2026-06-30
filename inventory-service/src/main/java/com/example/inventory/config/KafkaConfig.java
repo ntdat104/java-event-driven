@@ -34,6 +34,9 @@ public class KafkaConfig {
     @Value("${app.topics.partitions:12}")
     private int partitions;
 
+    @Value("${app.topics.replicas:1}")
+    private int replicas;
+
     public KafkaConfig(KafkaProperties properties) {
         this.properties = properties;
     }
@@ -58,12 +61,12 @@ public class KafkaConfig {
 
     @Bean
     NewTopic ordersCreatedTopic() {
-        return TopicBuilder.name(Topics.ORDERS_CREATED).partitions(partitions).replicas(1).build();
+        return TopicBuilder.name(Topics.ORDERS_CREATED).partitions(partitions).replicas(replicas).build();
     }
 
     @Bean
     NewTopic inventoryReservedTopic() {
-        return TopicBuilder.name(Topics.INVENTORY_RESERVED).partitions(partitions).replicas(1).build();
+        return TopicBuilder.name(Topics.INVENTORY_RESERVED).partitions(partitions).replicas(replicas).build();
     }
 
     // --- Producer (used by the OutboxRelay) -----------------------------------

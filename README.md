@@ -134,9 +134,15 @@ multiple relays don't double-publish.
 
 ## Running it
 
+### 0. Generate Kafka TLS certs (once)
+The Kafka cluster runs over **SSL/mTLS**, so generate the keystores first:
+```bash
+./scripts/generate-kafka-certs.sh        # writes ./certs/* (CA + broker & client stores)
+```
+
 ### 1. Start infrastructure
 ```bash
-docker compose up -d        # Kafka, Redis, OTel Collector, Tempo, Loki, Prometheus, Grafana, Kafka-UI
+docker compose up -d        # 5-broker Kafka (SSL), Redis, OTel Collector, Tempo, Loki, Prometheus, Grafana, Kafka-UI
 ```
 
 ### 2. Build
@@ -173,39 +179,39 @@ curl -s localhost:8082/api/inventory/p1
 ./scripts/load-test.sh 100000 200      # 100k requests, 200 concurrent (needs `hey` or falls back to ab)
 ```
 
-## Kafka over SSL / mTLS (production)
+## Production-like Kafka: 5-broker cluster over SSL/mTLS
 
-Local dev runs Kafka in **PLAINTEXT** (the default profile) — nothing above
-changes. For production, a `kafka-ssl` Spring profile turns on TLS with mutual
-auth. SSL flows through `KafkaProperties` into both the producer and the
-consumer, so **no `KafkaConfig` code changes are needed** — only config + certs.
+`docker-compose.yml` runs a **5-broker KRaft cluster** with TLS + mutual auth on
+every data listener — built for realistic benchmarking, not a single dev broker.
 
-```bash
-# 1. Generate a CA + broker & client keystores/truststores (full mTLS) into ./certs
-./scripts/generate-kafka-certs.sh
-#    Production: set a strong password and the real broker hostnames/IPs:
-#    KAFKA_CERT_PASSWORD=... KAFKA_BROKER_SAN="DNS:broker.prod,IP:10.0.0.5" ./scripts/generate-kafka-certs.sh
+| Aspect            | Setting                                                                 |
+|-------------------|-------------------------------------------------------------------------|
+| Brokers           | 5 (KRaft combined broker+controller), host ports `9092 / 9192 / 9292 / 9392 / 9492` |
+| Security          | `HOST` + inter-broker `DOCKER` listeners = **SSL, client-auth required (mTLS)**; internal `CONTROLLER` = PLAINTEXT |
+| Topics            | **5 partitions**, **RF=3**, `min.insync.replicas=2` (tolerate one broker down at `acks=all`) |
+| Cert SAN          | `localhost`, `kafka1`..`kafka5`, `127.0.0.1`                             |
 
-# 2. (local test) run the broker with SSL on the host listener (port 9092, client-auth required)
-docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d
-
-# 3. Run the apps with the kafka-ssl profile
-SPRING_PROFILES_ACTIVE=kafka-ssl mvn -s settings-local.xml -pl order-service     spring-boot:run
-SPRING_PROFILES_ACTIVE=kafka-ssl mvn -s settings-local.xml -pl inventory-service spring-boot:run
-```
-
-The `kafka-ssl` profile in each `application.yml` reads these (all overridable via env):
+SSL flows through Spring's `KafkaProperties` into both the producer and the
+consumer, so the SSL block lives directly under `spring.kafka` in each
+`application.yml` — **no `KafkaConfig` code change**. Everything is env-overridable:
 
 | Property / env var                                            | Default                              |
 |---------------------------------------------------------------|--------------------------------------|
-| `KAFKA_SECURITY_PROTOCOL`                                     | `SSL`                                |
-| `KAFKA_SSL_TRUSTSTORE_LOCATION`                               | `file:certs/kafka.client.truststore.jks` |
-| `KAFKA_SSL_KEYSTORE_LOCATION`                                 | `file:certs/kafka.client.keystore.jks`   |
+| `KAFKA_BOOTSTRAP`                                             | `localhost:9092,…:9192,…:9292,…:9392,…:9492` |
+| `KAFKA_SECURITY_PROTOCOL`                                    | `SSL`                                |
+| `KAFKA_SSL_TRUSTSTORE_LOCATION` / `..._KEYSTORE_LOCATION`    | `file:certs/kafka.client.{trust,key}store.jks` |
 | `KAFKA_SSL_TRUSTSTORE_PASSWORD` / `..._KEYSTORE_..` / `..._KEY_..` | `changeit`                      |
+| `app.topics.partitions` / `app.topics.replicas`             | `5` / `3`                            |
 
-> ⚠️ The committed certs use the throwaway password `changeit` for demo
-> convenience. For real production, regenerate with a strong password and keep
-> the key material in a secret manager — see `certs/README.md`.
+Regenerate certs for a real deployment (strong password + real broker hostnames):
+```bash
+KAFKA_CERT_PASSWORD=<strong> KAFKA_BROKER_SAN="DNS:broker1.prod,DNS:broker2.prod,IP:10.0.0.5" \
+  ./scripts/generate-kafka-certs.sh
+```
+
+> ⚠️ The committed certs use the throwaway password `changeit` for convenience.
+> For real production regenerate with a strong password and keep the key material
+> in a secret manager — never in git. See `certs/README.md`.
 
 ## Consoles
 

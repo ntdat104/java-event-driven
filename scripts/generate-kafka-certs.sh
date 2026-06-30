@@ -24,14 +24,17 @@ PASSWORD="${KAFKA_CERT_PASSWORD:-changeit}"
 VALIDITY="${KAFKA_CERT_VALIDITY:-3650}"
 BROKER_CN="${KAFKA_BROKER_CN:-localhost}"
 # Subject Alternative Names the broker cert is valid for. Hostname verification
-# checks the connect address against these, so list every name/IP clients use.
-BROKER_SAN="${KAFKA_BROKER_SAN:-DNS:localhost,DNS:kafka,IP:127.0.0.1}"
+# checks the connect address against these, so list every name/IP clients AND
+# other brokers use. Covers the 5-broker cluster (kafka1..kafka5) + host access.
+BROKER_SAN="${KAFKA_BROKER_SAN:-DNS:localhost,DNS:kafka,DNS:kafka1,DNS:kafka2,DNS:kafka3,DNS:kafka4,DNS:kafka5,IP:127.0.0.1}"
 CLIENT_CN="${KAFKA_CLIENT_CN:-kafka-client}"
 
 echo "→ Writing certs to $CERT_DIR (password: $PASSWORD, validity: ${VALIDITY}d)"
-rm -rf "$CERT_DIR"
 mkdir -p "$CERT_DIR"
 cd "$CERT_DIR"
+# Remove only previously-generated artifacts (keep README.md and any docs).
+rm -f ca-cert ca-key ca-cert.srl *.jks kafka_keystore_creds \
+      kafka_truststore_creds kafka_sslkey_creds client-ssl.properties
 
 # 1. Root CA --------------------------------------------------------------------
 openssl req -new -x509 -nodes -days "$VALIDITY" \
@@ -78,6 +81,17 @@ make_keystore kafka.client.keystore.jks "$CLIENT_CN" "DNS:localhost"
 printf '%s\n' "$PASSWORD" > kafka_keystore_creds
 printf '%s\n' "$PASSWORD" > kafka_truststore_creds
 printf '%s\n' "$PASSWORD" > kafka_sslkey_creds
+
+# An SSL client config the broker containers reuse for their healthcheck (the
+# CLI tools need certs once every listener is SSL). Paths are inside-container.
+cat > client-ssl.properties <<EOF
+security.protocol=SSL
+ssl.truststore.location=/etc/kafka/secrets/kafka.client.truststore.jks
+ssl.truststore.password=$PASSWORD
+ssl.keystore.location=/etc/kafka/secrets/kafka.client.keystore.jks
+ssl.keystore.password=$PASSWORD
+ssl.key.password=$PASSWORD
+EOF
 
 rm -f ca-cert.srl
 echo "✓ Done:"

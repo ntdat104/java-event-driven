@@ -1,10 +1,57 @@
-# Infra for local dev. Services themselves run on the host (mvn spring-boot:run)
-# and connect to these on localhost.
+# Production-like infra for benchmarking. The two Spring services run on the HOST
+# (mvn spring-boot:run) and connect to the Kafka cluster over SSL/mTLS via
+# localhost:{9092,9192,9292,9392,9492}.
+#
+#   Kafka : 5-broker KRaft cluster, SSL/mTLS on every data listener
+#           (client-auth required), RF=3 / min.insync.replicas=2, 5 partitions.
+#   Certs : run scripts/generate-kafka-certs.sh first → ./certs/*
 #
 # Observability = Grafana LGTM + OpenTelemetry:
 #   apps --OTLP--> otel-collector --> Tempo (traces) + Loki (logs)
 #   apps --/actuator/prometheus--<scrape> Prometheus (metrics, with exemplars)
-#   Grafana reads Prometheus + Tempo + Loki, correlated metric -> trace -> log.
+
+# ---- Shared Kafka broker config (anchors) ----------------------------------
+# Every broker is broker+controller (KRaft combined). Same cluster id + quorum.
+# Data listeners (HOST for the apps, DOCKER for inter-broker) are SSL; the
+# internal CONTROLLER listener stays PLAINTEXT on the trusted compose network.
+x-kafka-env: &kafka-env
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093,4@kafka4:9093,5@kafka5:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,HOST:SSL,DOCKER:SSL
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  # Durability: 3 replicas, tolerate one broker down while still accepting acks=all.
+  KAFKA_NUM_PARTITIONS: "5"
+  KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+  KAFKA_MIN_INSYNC_REPLICAS: "2"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  # SSL: one shared keystore (SAN covers kafka1..5 + localhost) + a truststore
+  # that trusts the CA, so brokers verify each other and the clients (mTLS).
+  KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/kafka.server.keystore.jks
+  KAFKA_SSL_KEYSTORE_PASSWORD: changeit
+  KAFKA_SSL_KEY_PASSWORD: changeit
+  KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.server.truststore.jks
+  KAFKA_SSL_TRUSTSTORE_PASSWORD: changeit
+  KAFKA_SSL_CLIENT_AUTH: required
+
+x-kafka-broker: &kafka-broker
+  image: apache/kafka:3.8.1
+  restart: unless-stopped
+  volumes:
+    - ./certs:/etc/kafka/secrets:ro
+  healthcheck:
+    # CLI tools need certs now that every data listener is SSL.
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server $$(hostname):19092 --command-config /etc/kafka/secrets/client-ssl.properties --list || exit 1"]
+    interval: 10s
+    timeout: 10s
+    retries: 15
+    start_period: 30s
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -22,33 +69,82 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-  kafka:
-    image: apache/kafka:3.8.1
-    container_name: edd-kafka
+
+  # ---- Kafka: 5-broker KRaft cluster over SSL/mTLS -------------------------
+  kafka1:
+    <<: *kafka-broker
+    container_name: edd-kafka1
+    hostname: kafka1
     ports:
       - "9092:9092"
     environment:
+      <<: *kafka-env
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      # HOST listener for clients on the host (services via localhost:9092),
-      # DOCKER listener for containers on the compose network (kafka-ui).
       KAFKA_LISTENERS: HOST://:9092,DOCKER://:19092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,DOCKER://kafka:19092
-      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,HOST:PLAINTEXT,DOCKER:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 12
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,DOCKER://kafka1:19092
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+      - kafka1-data:/var/lib/kafka/data
+
+  kafka2:
+    <<: *kafka-broker
+    container_name: edd-kafka2
+    hostname: kafka2
+    ports:
+      - "9192:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: HOST://:9092,DOCKER://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9192,DOCKER://kafka2:19092
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+      - kafka2-data:/var/lib/kafka/data
+
+  kafka3:
+    <<: *kafka-broker
+    container_name: edd-kafka3
+    hostname: kafka3
+    ports:
+      - "9292:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: HOST://:9092,DOCKER://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9292,DOCKER://kafka3:19092
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+      - kafka3-data:/var/lib/kafka/data
+
+  kafka4:
+    <<: *kafka-broker
+    container_name: edd-kafka4
+    hostname: kafka4
+    ports:
+      - "9392:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 4
+      KAFKA_LISTENERS: HOST://:9092,DOCKER://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9392,DOCKER://kafka4:19092
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+      - kafka4-data:/var/lib/kafka/data
+
+  kafka5:
+    <<: *kafka-broker
+    container_name: edd-kafka5
+    hostname: kafka5
+    ports:
+      - "9492:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 5
+      KAFKA_LISTENERS: HOST://:9092,DOCKER://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9492,DOCKER://kafka5:19092
+    volumes:
+      - ./certs:/etc/kafka/secrets:ro
+      - kafka5-data:/var/lib/kafka/data
 
   redis:
     image: redis:7.4-alpine
@@ -58,10 +154,6 @@ services:
       - "6379:6379"
 
   # ---- Observability: OpenTelemetry + LGTM ---------------------------------
-
-  # Single ingestion point for app telemetry. Apps push OTLP here (host -> :4318);
-  # the collector fans out: traces -> Tempo, logs -> Loki. Vendor-agnostic seam:
-  # swap a backend without touching the apps.
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1
     container_name: edd-otel-collector
@@ -75,8 +167,6 @@ services:
       - tempo
       - loki
 
-  # Traces. Accepts OTLP from the collector; generates span metrics + service
-  # graph and remote-writes them to Prometheus (RED metrics for free).
   tempo:
     image: grafana/tempo:2.7.0
     container_name: edd-tempo
@@ -87,7 +177,6 @@ services:
     ports:
       - "3200:3200"   # Tempo HTTP (Grafana queries this)
 
-  # Logs. Loki 3.x ingests OTLP natively (/otlp/v1/logs).
   loki:
     image: grafana/loki:3.3.2
     container_name: edd-loki
@@ -103,10 +192,7 @@ services:
     container_name: edd-prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      # Exemplars: lets a metric point carry a traceID so you can jump
-      # Prometheus panel -> the exact trace in Tempo.
       - "--enable-feature=exemplar-storage"
-      # Lets Tempo's metrics_generator push span metrics in via remote write.
       - "--web.enable-remote-write-receiver"
     ports:
       - "9090:9090"
@@ -124,7 +210,6 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-      # Newer correlation features (trace -> logs/metrics) ship behind flags.
       GF_FEATURE_TOGGLES_ENABLE: traceToMetrics,traceqlEditor
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -134,7 +219,8 @@ services:
       - tempo
       - loki
 
-  # Optional: Kafka UI for inspecting topics, consumer lag, and DLQ contents.
+  # Kafka UI for topics, consumer lag, and DLQ contents. Talks to the cluster
+  # over SSL/mTLS via the internal DOCKER listeners.
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: edd-kafka-ui
@@ -142,12 +228,24 @@ services:
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:19092,kafka2:19092,kafka3:19092,kafka4:19092,kafka5:19092
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SSL
+      KAFKA_CLUSTERS_0_SSL_TRUSTSTORELOCATION: /certs/kafka.client.truststore.jks
+      KAFKA_CLUSTERS_0_SSL_TRUSTSTOREPASSWORD: changeit
+      KAFKA_CLUSTERS_0_SSL_KEYSTORELOCATION: /certs/kafka.client.keystore.jks
+      KAFKA_CLUSTERS_0_SSL_KEYSTOREPASSWORD: changeit
       DYNAMIC_CONFIG_ENABLED: "true"
+    volumes:
+      - ./certs:/certs:ro
     depends_on:
-      kafka:
+      kafka1:
         condition: service_healthy
 
 volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
+  kafka4-data:
+  kafka5-data:
   tempo-data:
   loki-data:
