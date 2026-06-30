@@ -19,7 +19,6 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
-import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.ContainerProperties.AckMode;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
@@ -45,24 +44,6 @@ public class KafkaConfig {
     // 12 partitions → up to 12 consumers in parallel. Size partitions for peak
     // throughput; they are cheap to add but cannot be reduced later.
 
-    @Bean("kafkaBatchListenerContainerFactory")
-    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaBatchListenerContainerFactory(
-            ConsumerFactory<String, String> consumerFactory) {
-
-        ConcurrentKafkaListenerContainerFactory<String, String> factory =
-                new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(consumerFactory);
-
-        // BẮT BUỘC: Kích hoạt chế độ Batch xử lý lô
-        factory.setBatchListener(true);
-
-        // Cấu hình Ack thủ công ngay lập tức theo thiết kế Outbox của bạn
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.getContainerProperties().setObservationEnabled(true);
-
-        return factory;
-    }
-
     @Bean
     NewTopic ordersCreatedTopic() {
         return TopicBuilder.name(Topics.ORDERS_CREATED).partitions(partitions).replicas(replicas).build();
@@ -74,10 +55,13 @@ public class KafkaConfig {
     }
 
     // --- Producer (used by the OutboxRelay) -----------------------------------
-    // Tuned for high throughput WITHOUT sacrificing durability:
-    //  - acks=all + idempotence  → no data loss, no duplicates on the broker
-    //  - lz4 compression         → less network, higher effective throughput
-    //  - linger.ms + batch.size  → amortise per-record overhead at 10k req/s
+    // Tuned for high throughput WITHOUT sacrificing durability. The batching knobs
+    // (acks=all, lz4 compression, linger.ms, batch.size) live in application.yml;
+    // here we set only what needs code or must not be left to chance:
+    //  - idempotence            → no duplicates on the broker, ordering preserved
+    //  - max.in.flight=5        → idempotence keeps order even with 5 in-flight,
+    //                             so we do NOT throttle to 1 (that would cap throughput)
+    //  - buffer.memory 64MB     → absorb 10k req/s bursts without blocking senders
 
     @Bean
     ProducerFactory<String, String> producerFactory() {
@@ -85,12 +69,9 @@ public class KafkaConfig {
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-        props.put(ProducerConfig.ACKS_CONFIG, "all");
-        props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4");
-        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
-        props.put(ProducerConfig.BATCH_SIZE_CONFIG, 64 * 1024);
         props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
         props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 120_000);
+        props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 64L * 1024 * 1024);
         return new DefaultKafkaProducerFactory<>(props);
     }
 
@@ -121,6 +102,11 @@ public class KafkaConfig {
         return new DefaultKafkaConsumerFactory<>(props);
     }
 
+    // Single-record listener (we process ONE event at a time). Offsets are
+    // committed once per poll (AckMode.BATCH) instead of once per record — at
+    // 10k req/s a synchronous commit per record is the main bottleneck, and
+    // at-least-once redelivery is safe because consumers dedupe on eventId
+    // (DB inbox + Redis). DefaultErrorHandler retries a failing record, then DLT.
     @Bean
     ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
             ConsumerFactory<String, String> cf, DefaultErrorHandler errorHandler) {
@@ -128,7 +114,7 @@ public class KafkaConfig {
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(cf);
         factory.setConcurrency(partitions);                       // one thread per partition
-        factory.getContainerProperties().setAckMode(AckMode.MANUAL_IMMEDIATE);
+        factory.getContainerProperties().setAckMode(AckMode.BATCH);
         factory.getContainerProperties().setObservationEnabled(true); // extract traceparent header
         factory.setCommonErrorHandler(errorHandler);
         return factory;

@@ -8,6 +8,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -19,7 +20,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class OutboxRelay {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
-    private static final int BATCH_SIZE = 200;
+
+    // How many pending rows to drain per tick. At a 50ms poll interval, 500 rows
+    // ⇒ ~10k events/s of headroom per instance. Tune with app.outbox.batch-size.
+    @Value("${app.outbox.batch-size:500}")
+    private int batchSize;
 
     private final OutboxRepository outboxRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
@@ -39,7 +44,7 @@ public class OutboxRelay {
         // STEP 1: Đọc và Lock dữ liệu trong DB thật nhanh, sau đó COMMIT luôn
         // Cần đảm bảo hàm repository.fetchAndLockBatch() sẽ cập nhật trạng thái từ PENDING -> PROCESSING
         List<OutboxEvent> batch = transactionTemplate.execute(status -> {
-            List<OutboxEvent> pending = outboxRepository.findPendingBatch(Limit.of(BATCH_SIZE), OutboxStatus.PENDING);
+            List<OutboxEvent> pending = outboxRepository.findPendingBatch(Limit.of(batchSize), OutboxStatus.PENDING);
             if (pending.isEmpty()) {
                 return Collections.emptyList();
             }
